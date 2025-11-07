@@ -1,5 +1,7 @@
 # ⚡ Ollama CLI
 
+Programado por Daniel Serrano Armenta dani.eus79@gmai.com
+
 Una aplicación de terminal sencilla, potente y sin dependencias (¡excepto Ollama!) para chatear con modelos de lenguaje locales. Programada en Go.
 
 ![Logo de Ollama](https://ollama.com/public/ollama.png)
