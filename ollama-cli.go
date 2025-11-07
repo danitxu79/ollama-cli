@@ -1,27 +1,43 @@
-//Programado por dani.eus79@gmail.com
+/*
+ ollama-cli
+
+ ollama-cli es una aplicación de terminal interactiva escrita en Go para chatear
+ con modelos de lenguaje locales a través del servidor Ollama.
+
+ Ofrece gestión automática del servidor, selección de modelos, historial de chat
+ (contexto), prompts de sistema y una interfaz de usuario colorida con logos
+ en degradado.
+
+ Copyright (c) 2025, dani.eus79@gmail.com
+ Todos los derechos reservados.
+
+ Uso:
+ go run .
+ */
+
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"os"
-	"os/exec"
-	"os/signal"
-	"runtime"
-	"strconv"
-	"strings"
-	"syscall"
-	"time"
+	"bufio"         // Para leer la entrada del usuario
+	"bytes"         // Para el body de la petición POST
+	"encoding/json" // Para parsear JSON (API de Ollama y logos.json)
+"fmt"
+"io"      // Para leer el cuerpo de las respuestas HTTP
+"log"     // Para errores fatales de arranque
+"net/http"  // Para hacer peticiones a la API de Ollama
+"os"        // Para leer archivos (logos.json), entrada/salida estándar, y salir
+"os/exec"   // Para ejecutar 'ollama serve' y 'clear'/'cls'
+"os/signal" // Para capturar Ctrl+C (SIGINT)
+"runtime"   // Para detectar el SO (windows, linux, darwin) en clearScreen
+"strconv"   // Para convertir la elección del usuario (string) a int
+"strings"   // Para limpiar y comparar strings
+"syscall"   // Para capturar la señal de terminación (SIGTERM)
+"time"      // Para timeouts y sleeps
 
-	"github.com/fatih/color"
+"github.com/fatih/color" // Dependencia para los colores básicos
 )
 
-// --- Definición de nuestros colores ---
+// --- Definición de nuestros colores básicos ---
 var (
 	cSuccess = color.New(color.FgGreen, color.Bold)
 	cInfo    = color.New(color.FgYellow)
@@ -30,6 +46,12 @@ var (
 	cModel   = color.New(color.FgHiWhite)
 )
 
+// --- Estructura para definir colores RGB ---
+type RGB struct {
+	R, G, B uint8
+}
+
+// La URL base del servidor de Ollama
 const ollamaURL = "http://localhost:11434/"
 
 // --- Estructuras para parsear el JSON de /api/tags ---
@@ -46,28 +68,22 @@ type ModelDetails struct {
 
 // --- Estructuras para /api/generate ---
 
-// GenerateRequest es la estructura que ENVIAMOS a /api/generate
 type GenerateRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
-	// ¡NUEVO CAMPO!
+	Model   string  `json:"model"`
+	Prompt  string  `json:"prompt"`
+	Stream  bool    `json:"stream"`
 	System  string  `json:"system,omitempty"`
 	Context []int64 `json:"context,omitempty"`
 }
 
-// GenerateResponse es la estructura que RECIBIMOS (en trozos)
 type GenerateResponse struct {
-	Response string `json:"response"`
-	Done     bool   `json:"done"`
-	// ¡MODIFICADO! Añadimos el campo de contexto
-	// 'omitempty' para que no falle si un chunk no lo trae
-	Context []int64 `json:"context,omitempty"`
+	Response string  `json:"response"`
+	Done     bool    `json:"done"`
+	Context  []int64 `json:"context,omitempty"`
 }
 
 // ---------------------------------------------------
 
-// loadArt carga el arte ASCII desde un archivo JSON
 func loadArt(filename string) (map[string][]string, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
@@ -84,8 +100,8 @@ func loadArt(filename string) (map[string][]string, error) {
 // ---------------------------------------------------
 
 func main() {
-	// ... (1. clearScreen y 2. loadArt no cambian) ...
 	clearScreen()
+
 	artMap, err := loadArt("logos.json")
 	if err != nil {
 		cError.Printf("Aviso: No se pudieron cargar los logos ASCII: %v\n", err)
@@ -93,15 +109,16 @@ func main() {
 		artMap = make(map[string][]string)
 	}
 
-	// ... (3. Iniciar Ollama, 4. Gestión de limpieza, 5. waitForOllama, 6. listAndSelectModels no cambian) ...
 	cInfo.Print("Iniciando el servidor de Ollama...")
 	cmd := exec.Command("ollama", "serve")
 	err = cmd.Start()
 	if err != nil {
 		log.Fatalf("Error al iniciar 'ollama serve': %v. ¿Está 'ollama' en tu PATH?", err)
 	}
+
 	fmt.Printf("\r")
 	cInfo.Printf("Servidor de Ollama iniciado (PID: %d). Esperando a que esté listo...\n", cmd.Process.Pid)
+
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -113,12 +130,15 @@ func main() {
 		}
 		os.Exit(0)
 	}()
+
 	if !waitForOllama(15 * time.Second) {
 		cError.Println("Ollama no respondió a tiempo. Deteniendo el proceso...")
 		cmd.Process.Kill()
 		os.Exit(1)
 	}
+
 	cSuccess.Println("\r¡Ollama está listo y respondiendo!                       ")
+
 	selectedModel, err := listAndSelectModels()
 	if err != nil {
 		cError.Printf("Error al seleccionar el modelo: %v\n", err)
@@ -126,7 +146,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 7. Lógica principal de la aplicación (post-selección)
 	if selectedModel == "" {
 		cInfo.Println("No se seleccionó ningún modelo o no hay modelos disponibles. Saliendo.")
 	} else {
@@ -136,14 +155,10 @@ func main() {
 		fmt.Println("")
 		cInfo.Print("Modelo seleccionado: ")
 		cSuccess.Println(selectedModel)
-		cInfo.Println("Escribe 'exit' para salir o 'clear' para resetear la conversación.")
 
-
-		// ¡MODIFICADO! Pasamos 'artMap' a chatLoop por si reseteamos
 		chatLoop(selectedModel, artMap)
 	}
 
-	// ... (8. Limpieza al salir no cambia) ...
 	fmt.Println("")
 	cInfo.Println("Aplicación terminada. Deteniendo el servidor de Ollama...")
 	if err := cmd.Process.Kill(); err != nil {
@@ -153,10 +168,6 @@ func main() {
 	}
 }
 
-// ... (waitForOllama, listAndSelectModels, showLogo, clearScreen no cambian) ...
-// (Omitidos por brevedad, son idénticos a la versión anterior)
-
-// waitForOllama (función idéntica)
 func waitForOllama(timeout time.Duration) bool {
 	startTime := time.Now()
 	for {
@@ -174,7 +185,6 @@ func waitForOllama(timeout time.Duration) bool {
 	}
 }
 
-// listAndSelectModels (función idéntica)
 func listAndSelectModels() (string, error) {
 	resp, err := http.Get(ollamaURL + "api/tags")
 	if err != nil {
@@ -227,18 +237,51 @@ func listAndSelectModels() (string, error) {
 	}
 }
 
-// showLogo (función idéntica)
+// --- Mostrar logo con degradado RGB ANSI ---
 func showLogo(modelName string, artMap map[string][]string) {
-	for key, artLines := range artMap {
-		if strings.Contains(strings.ToLower(modelName), key) {
-			artString := strings.Join(artLines, "\n")
-			cModel.Println(artString)
-			return
+	var startRGB, endRGB RGB
+	modelKey := ""
+
+	if strings.Contains(strings.ToLower(modelName), "llama") {
+		modelKey = "llama"
+		startRGB = RGB{R: 170, G: 0, B: 255}
+		endRGB = RGB{R: 0, G: 170, B: 255}
+	} else if strings.Contains(strings.ToLower(modelName), "mistral") {
+		modelKey = "mistral"
+		startRGB = RGB{R: 255, G: 140, B: 0}
+		endRGB = RGB{R: 0, G: 130, B: 255}
+	} else if strings.Contains(strings.ToLower(modelName), "gemma") {
+		modelKey = "gemma"
+		startRGB = RGB{R: 74, G: 144, B: 226}
+		endRGB = RGB{R: 213, G: 62, B: 79}
+	} else if strings.Contains(strings.ToLower(modelName), "phi3") {
+		modelKey = "phi3"
+		startRGB = RGB{R: 0, G: 180, B: 180}
+		endRGB = RGB{R: 200, G: 200, B: 0}
+	} else if strings.Contains(strings.ToLower(modelName), "qwen") {
+		modelKey = "qwen"
+		startRGB = RGB{R: 255, G: 100, B: 0}
+		endRGB = RGB{R: 255, G: 200, B: 0}
+	} else if strings.Contains(strings.ToLower(modelName), "deepseek") {
+		modelKey = "deepseek"
+		startRGB = RGB{R: 0, G: 200, B: 100}
+		endRGB = RGB{R: 100, G: 100, B: 255}
+	} else {
+		for key := range artMap {
+			if strings.Contains(strings.ToLower(modelName), key) {
+				modelKey = key
+				break
+			}
 		}
+		startRGB = RGB{R: 240, G: 240, B: 240}
+		endRGB = RGB{R: 220, G: 220, B: 220}
+	}
+
+	if art, ok := artMap[modelKey]; ok {
+		printWithGradient(art, startRGB, endRGB)
 	}
 }
 
-// clearScreen (función idéntica)
 func clearScreen() {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -251,18 +294,13 @@ func clearScreen() {
 	cmd.Run()
 }
 
-
-// ¡MODIFICADO! chatLoop ahora define el System Prompt
 func chatLoop(modelName string, artMap map[string][]string) {
 	scanner := bufio.NewScanner(os.Stdin)
 	var currentContext []int64
 
-	// ¡NUEVO! Definimos la personalidad de nuestro bot.
-	// Esto combate la alucinación de "ChatGPT".
-	systemPrompt := "Eres un asistente servicial llamado Gemma. NO eres ChatGPT. Estás hablando con un usuario en una terminal."
+	systemPrompt := fmt.Sprintf("Eres un asistente servicial. El modelo que estás usando es %s. NO eres ChatGPT. Estás hablando con un usuario en una terminal.", modelName)
 
-	// Informamos al usuario de las nuevas instrucciones
-	cInfo.Println("System Prompt cargado. Escribe 'exit' o 'clear'.")
+	cInfo.Println("System Prompt cargado. Escribe 'exit' para salir o 'clear' para resetear.")
 
 	for {
 		cPrompt.Print("\n>>> ")
@@ -282,7 +320,6 @@ func chatLoop(modelName string, artMap map[string][]string) {
 			fmt.Println("")
 			cInfo.Print("Modelo seleccionado: ")
 			cSuccess.Println(modelName)
-			// ¡MODIFICADO! Volvemos a mostrar el aviso
 			cInfo.Println("System Prompt cargado. Contexto reseteado.")
 			continue
 		}
@@ -292,10 +329,6 @@ func chatLoop(modelName string, artMap map[string][]string) {
 		}
 
 		cModel.Print("IA: ")
-
-		// ¡MODIFICADO! Pasamos el systemPrompt.
-		// Nota: El systemPrompt solo se usa de verdad en la *primera* petición
-		// (cuando currentContext es nil), pero la API de Ollama gestiona esto.
 		newContext, err := sendPrompt(modelName, input, systemPrompt, currentContext)
 
 		if err != nil {
@@ -308,19 +341,16 @@ func chatLoop(modelName string, artMap map[string][]string) {
 	}
 }
 
-// ¡MODIFICADO! sendPrompt ahora acepta el systemPrompt
 func sendPrompt(modelName string, prompt string, system string, context []int64) ([]int64, error) {
-	// 1. Preparar la estructura del Request
 	reqData := GenerateRequest{
 		Model:   modelName,
 		Prompt:  prompt,
 		Stream:  true,
-		System:  system, // ¡NUEVO!
+		System:  system,
 		Context: context,
 	}
 
 	jsonData, err := json.Marshal(reqData)
-	// ... (el resto de la función sendPrompt es IDÉNTICA) ...
 	if err != nil {
 		return nil, fmt.Errorf("error al crear JSON: %w", err)
 	}
@@ -360,4 +390,33 @@ func sendPrompt(modelName string, prompt string, system string, context []int64)
 
 	fmt.Println()
 	return finalContext, nil
+}
+
+// --- Funciones para el degradado RGB ANSI ---
+
+func lerp(start, end uint8, ratio float64) uint8 {
+	return uint8(float64(start) + ratio*(float64(end)-float64(start)))
+}
+
+func printWithGradient(lines []string, startRGB, endRGB RGB) {
+	maxWidth := 0
+	for _, line := range lines {
+		if len([]rune(line)) > maxWidth {
+			maxWidth = len([]rune(line))
+		}
+	}
+	if maxWidth == 0 {
+		return
+	}
+
+	for _, line := range lines {
+		for x, char := range []rune(line) {
+			ratio := float64(x) / float64(maxWidth)
+			r := lerp(startRGB.R, endRGB.R, ratio)
+			g := lerp(startRGB.G, endRGB.G, ratio)
+			b := lerp(startRGB.B, endRGB.B, ratio)
+			fmt.Printf("\x1b[38;2;%d;%d;%dm%s\x1b[0m", r, g, b, string(char))
+		}
+		fmt.Println()
+	}
 }
