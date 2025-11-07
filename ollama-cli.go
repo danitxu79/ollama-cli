@@ -21,18 +21,19 @@ import (
 	"bufio"         // Para leer la entrada del usuario
 	"bytes"         // Para el body de la petición POST
 	"encoding/json" // Para parsear JSON (API de Ollama y logos.json)
-"fmt"
-"io"      // Para leer el cuerpo de las respuestas HTTP
-"log"     // Para errores fatales de arranque
-"net/http"  // Para hacer peticiones a la API de Ollama
-"os"        // Para leer archivos (logos.json), entrada/salida estándar, y salir
-"os/exec"   // Para ejecutar 'ollama serve' y 'clear'/'cls'
-"os/signal" // Para capturar Ctrl+C (SIGINT)
-"runtime"   // Para detectar el SO (windows, linux, darwin) en clearScreen
-"strconv"   // Para convertir la elección del usuario (string) a int
-"strings"   // Para limpiar y comparar strings
-"syscall"   // Para capturar la señal de terminación (SIGTERM)
-"time"      // Para timeouts y sleeps
+	"fmt"     // Para realizar operaciones de entrada y salida (I/O) formateadas
+	"io"      // Para leer el cuerpo de las respuestas HTTP
+	"log"     // Para errores fatales de arranque
+	"net/http"  // Para hacer peticiones a la API de Ollama
+	"os"        // Para leer archivos (logos.json), entrada/salida estándar, y salir
+	"os/exec"   // Para ejecutar 'ollama serve' y 'clear'/'cls'
+	"os/signal" // Para capturar Ctrl+C (SIGINT)
+	"regexp"  // Para parsear la respuesta
+	"runtime"   // Para detectar el SO (windows, linux, darwin) en clearScreen
+	"strconv"   // Para convertir la elección del usuario (string) a int
+	"strings"   // Para limpiar y comparar strings
+	"syscall"   // Para capturar la señal de terminación (SIGTERM)
+	"time"      // Para timeouts y sleeps
 
 "github.com/fatih/color" // Dependencia para los colores básicos
 )
@@ -298,7 +299,15 @@ func chatLoop(modelName string, artMap map[string][]string) {
 	scanner := bufio.NewScanner(os.Stdin)
 	var currentContext []int64
 
-	systemPrompt := fmt.Sprintf("Eres un asistente servicial. El modelo que estás usando es %s. NO eres ChatGPT. Estás hablando con un usuario en una terminal.", modelName)
+	// ¡INSTRUCCIÓN MODIFICADA!
+	systemPrompt := fmt.Sprintf(
+		"Eres un asistente servicial. El modelo que estás usando es %s. NO eres ChatGPT.\n"+
+		"Estás hablando con un usuario en una terminal.\n"+
+		"Cuando el usuario te pida crear un archivo, formatea tu respuesta usando esta etiqueta especial:\n"+
+		"<file:nombre.ext>\n[CONTENIDO DEL ARCHIVO AQUÍ]\n</file>\n"+
+		"SOLO usa este formato para crear archivos.",
+		modelName,
+	)
 
 	cInfo.Println("System Prompt cargado. Escribe 'exit' para salir o 'clear' para resetear.")
 
@@ -329,19 +338,28 @@ func chatLoop(modelName string, artMap map[string][]string) {
 		}
 
 		cModel.Print("IA: ")
-		newContext, err := sendPrompt(modelName, input, systemPrompt, currentContext)
+
+		// ¡MODIFICADO! sendPrompt ahora devuelve 3 valores
+		fullResponse, newContext, err := sendPrompt(modelName, input, systemPrompt, currentContext)
 
 		if err != nil {
 			cError.Printf("Error al generar respuesta: %v\n", err)
 			currentContext = nil
 			cError.Println("Contexto reseteado debido a un error.")
 		} else {
-			currentContext = newContext
+			currentContext = newContext // Guardamos el nuevo contexto
+
+			// ¡NUEVO! Parseamos la respuesta completa en busca de archivos
+			err := parseAndSaveFiles(fullResponse)
+			if err != nil {
+				cError.Printf("\nError al guardar archivos: %v\n", err)
+			}
 		}
 	}
 }
 
-func sendPrompt(modelName string, prompt string, system string, context []int64) ([]int64, error) {
+func sendPrompt(modelName string, prompt string, system string, context []int64) (string, []int64, error) {
+	// 1. Preparar la estructura del Request
 	reqData := GenerateRequest{
 		Model:   modelName,
 		Prompt:  prompt,
@@ -352,32 +370,40 @@ func sendPrompt(modelName string, prompt string, system string, context []int64)
 
 	jsonData, err := json.Marshal(reqData)
 	if err != nil {
-		return nil, fmt.Errorf("error al crear JSON: %w", err)
+		return "", nil, fmt.Errorf("error al crear JSON: %w", err)
 	}
 
 	reqBody := bytes.NewBuffer(jsonData)
 	resp, err := http.Post(ollamaURL+"api/generate", "application/json", reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("error en la petición POST: %w", err)
+		return "", nil, fmt.Errorf("error en la petición POST: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("respuesta inesperada del servidor: %s", resp.Status)
+		return "", nil, fmt.Errorf("respuesta inesperada del servidor: %s", resp.Status)
 	}
+
+	// ¡NUEVO! Un buffer para guardar la respuesta completa
+	var fullResponse strings.Builder
 
 	streamScanner := bufio.NewScanner(resp.Body)
 	var genResp GenerateResponse
-	var finalContext []int64
+	var finalContext []int64 // Para guardar el contexto final
 
 	for streamScanner.Scan() {
 		line := streamScanner.Bytes()
 		if err := json.Unmarshal(line, &genResp); err != nil {
-			return nil, fmt.Errorf("error al parsear chunk de JSON: %w", err)
+			return "", nil, fmt.Errorf("error al parsear chunk de JSON: %w", err)
 		}
 
+		// Imprimimos el streaming como siempre
 		cModel.Print(genResp.Response)
 
+		// ¡NUEVO! Guardamos este trozo en el buffer
+		fullResponse.WriteString(genResp.Response)
+
+		// Cuando 'Done' es true, ese chunk contiene el contexto final
 		if genResp.Done {
 			finalContext = genResp.Context
 			break
@@ -385,11 +411,12 @@ func sendPrompt(modelName string, prompt string, system string, context []int64)
 	}
 
 	if err := streamScanner.Err(); err != nil {
-		return nil, fmt.Errorf("error al leer el stream de respuesta: %w", err)
+		return "", nil, fmt.Errorf("error al leer el stream de respuesta: %w", err)
 	}
 
 	fmt.Println()
-	return finalContext, nil
+	// ¡MODIFICADO! Devolvemos la respuesta completa y el contexto
+	return fullResponse.String(), finalContext, nil
 }
 
 // --- Funciones para el degradado RGB ANSI ---
@@ -419,4 +446,56 @@ func printWithGradient(lines []string, startRGB, endRGB RGB) {
 		}
 		fmt.Println()
 	}
+}
+
+// --- ¡NUEVA FUNCIÓN PARA GUARDAR ARCHIVOS! ---
+
+// parseAndSaveFiles busca etiquetas <file:...> en la respuesta y guarda el contenido.
+func parseAndSaveFiles(response string) error {
+	// (?s) es un flag que hace que el "." (punto) incluya saltos de línea.
+	// <file:(.+?)>: Captura el nombre del archivo (Grupo 1)
+	// \n(.*?)\n: Captura el contenido del archivo (Grupo 2)
+	// </file>: Marca el final
+	re := regexp.MustCompile(`(?s)<file:(.+?)>\n(.*?)\n<\/file>`)
+
+	// Buscamos *todas* las coincidencias (por si pide crear varios archivos)
+	matches := re.FindAllStringSubmatch(response, -1)
+
+	if len(matches) == 0 {
+		return nil // No se encontraron archivos, no es un error.
+	}
+
+	var filesWritten []string // Para informar al usuario
+
+	for _, match := range matches {
+		if len(match) != 3 {
+			continue // Coincidencia inválida
+		}
+
+		filename := strings.TrimSpace(match[1])
+		code := strings.TrimSpace(match[2])
+
+		// --- ¡IMPORTANTE! Medida de seguridad ---
+		// Evitamos que el LLM escriba en rutas peligrosas (ej. ../.bashrc)
+		if strings.Contains(filename, "..") || strings.HasPrefix(filename, "/") || strings.HasPrefix(filename, "\\") {
+			cError.Printf("\nAVISO DE SEGURIDAD: Se ha bloqueado la escritura de '%s' (ruta inválida).\n", filename)
+			continue // Saltamos este archivo
+		}
+
+		// Escribimos el archivo en la carpeta actual
+		err := os.WriteFile(filename, []byte(code), 0644) // 0644 = permisos de lectura/escritura
+		if err != nil {
+			cError.Printf("\nError al escribir el archivo '%s': %v\n", filename, err)
+			continue
+		}
+
+		filesWritten = append(filesWritten, filename)
+	}
+
+	if len(filesWritten) > 0 {
+		// Informamos al usuario de que la magia ha ocurrido
+		cSuccess.Printf("\n✅ Archivo(s) guardado(s): %s\n", strings.Join(filesWritten, ", "))
+	}
+
+	return nil
 }
