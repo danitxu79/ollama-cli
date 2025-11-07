@@ -1,0 +1,6 @@
+# Binario compilado de Go
+ollama-cli
+ollama-cli.exe
+
+# Archivos del sistema operativo
+.DS_Store
