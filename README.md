@@ -96,3 +96,13 @@ Las contribuciones son bienvenidas. Si tienes una idea para una mejora o has enc
 3.  Haz tus cambios y haz *commit* (`git commit -m "feat: Añadir nueva mejora"`).
 4.  Haz *Push* a tu rama (`git push origin feature/nueva-mejora`).
 5.  Abre un *Pull Request*.
+
+
+<div align="center">
+  <br/>
+  <p><code>>_ sudo buy-me-a-coffee --theme=dark --force</code></p>
+  <a href="https://www.buymeacoffee.com/danitxu" target="_blank">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-black.png" alt="Buy Me A Coffee" style="height: 50px !important;width: 180px !important; box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;">
+  </a>
+  <br/>
+</div>

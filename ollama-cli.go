@@ -299,17 +299,26 @@ func chatLoop(modelName string, artMap map[string][]string) {
 	scanner := bufio.NewScanner(os.Stdin)
 	var currentContext []int64
 
-	// ¡INSTRUCCIÓN MODIFICADA!
+	// --- ¡SYSTEM PROMPT MEJORADO Y ESTRICTO! ---
 	systemPrompt := fmt.Sprintf(
-		"Eres un asistente servicial. El modelo que estás usando es %s. NO eres ChatGPT.\n"+
-		"Estás hablando con un usuario en una terminal.\n"+
-		"Cuando el usuario te pida crear un archivo, formatea tu respuesta usando esta etiqueta especial:\n"+
-		"<file:nombre.ext>\n[CONTENIDO DEL ARCHIVO AQUÍ]\n</file>\n"+
-		"SOLO usa este formato para crear archivos.",
+		"Eres un asistente de programación experto. El modelo que estás usando es %s.\n"+
+		"Estás hablando con un usuario en una terminal.\n\n"+
+		"--- REGLAS PARA CREAR/MODIFICAR ARCHIVOS ---\n"+
+		"1. Cuando el usuario pida crear o modificar un archivo, DEBES responder con el CÓDIGO FUENTE COMPLETO Y LITERAL.\n"+
+		"2. DEBES escribir este código dentro de una etiqueta <file:nombre.ext>.\n"+
+		"3. NO uses marcadores de posición como '[contenido]' o '[código]'. Escribe el código real.\n\n"+
+		"--- EJEMPLO DE CÓMO CREAR UN ARCHIVO ---\n"+
+		"<file:hola.py>\n"+
+		"print(\"Hola desde un archivo\")\n"+
+		"</file>\n\n"+
+		"--- REGLAS PARA MODIFICAR ARCHIVOS ---\n"+
+		"1. Si el usuario pide *modificar* un archivo, te proporcionaré su contenido actual en un bloque 'CONTEXTO DE ARCHIVOS'.\n"+
+		"2. Usa ese contexto para generar la NUEVA VERSIÓN COMPLETA del archivo, y escríbela en una etiqueta <file:...>.\n",
 		modelName,
 	)
+	// --- FIN DEL SYSTEM PROMPT ---
 
-	cInfo.Println("System Prompt cargado. Escribe 'exit' para salir o 'clear' para resetear.")
+	cInfo.Println("System Prompt (v2) cargado. Escribe 'exit' para salir o 'clear' para resetear.")
 
 	for {
 		cPrompt.Print("\n>>> ")
@@ -318,29 +327,34 @@ func chatLoop(modelName string, artMap map[string][]string) {
 		}
 		input := strings.TrimSpace(scanner.Text())
 
+		// Comandos para salir
 		if input == "exit" || input == "quit" {
 			break
 		}
 
+		// Comando para resetear el contexto
 		if input == "clear" || input == "reset" {
-			currentContext = nil
+			currentContext = nil // Borramos el contexto
 			clearScreen()
-			showLogo(modelName, artMap)
+			showLogo(modelName, artMap) // Repintamos el logo
 			fmt.Println("")
 			cInfo.Print("Modelo seleccionado: ")
 			cSuccess.Println(modelName)
-			cInfo.Println("System Prompt cargado. Contexto reseteado.")
-			continue
+			cInfo.Println("System Prompt (v2) cargado. Contexto reseteado.")
+			continue // Volvemos al inicio del bucle
 		}
 
 		if input == "" {
 			continue
 		}
 
+		// Inyectamos el contexto de los archivos mencionados
+		currentSystemPrompt := injectFileContext(input, systemPrompt)
+
 		cModel.Print("IA: ")
 
-		// ¡MODIFICADO! sendPrompt ahora devuelve 3 valores
-		fullResponse, newContext, err := sendPrompt(modelName, input, systemPrompt, currentContext)
+		// Pasamos el system prompt modificado
+		fullResponse, newContext, err := sendPrompt(modelName, input, currentSystemPrompt, currentContext)
 
 		if err != nil {
 			cError.Printf("Error al generar respuesta: %v\n", err)
@@ -349,7 +363,7 @@ func chatLoop(modelName string, artMap map[string][]string) {
 		} else {
 			currentContext = newContext // Guardamos el nuevo contexto
 
-			// ¡NUEVO! Parseamos la respuesta completa en busca de archivos
+			// ParseAndSaveFiles se encarga de SOBRESCRIBIR el archivo
 			err := parseAndSaveFiles(fullResponse)
 			if err != nil {
 				cError.Printf("\nError al guardar archivos: %v\n", err)
@@ -357,6 +371,7 @@ func chatLoop(modelName string, artMap map[string][]string) {
 		}
 	}
 }
+
 
 func sendPrompt(modelName string, prompt string, system string, context []int64) (string, []int64, error) {
 	// 1. Preparar la estructura del Request
@@ -498,4 +513,52 @@ func parseAndSaveFiles(response string) error {
 	}
 
 	return nil
+}
+
+// --- ¡NUEVA FUNCIÓN PARA CONTEXTO DE ARCHIVOS! ---
+
+// injectFileContext busca nombres de archivo en el prompt, lee su contenido
+// y lo añade al system prompt.
+func injectFileContext(prompt string, baseSystemPrompt string) string {
+	// Una regex simple para encontrar palabras que parezcan nombres de archivo
+	// (ej. main.py, Dockerfile, mi_script.js, .gitignore)
+	re := regexp.MustCompile(`[a-zA-Z0-9_.-]+\.[a-zA-Z0-9_]+|[a-zA-Z0-9_.-]*[fF]ile`)
+
+	matches := re.FindAllString(prompt, -1)
+	if len(matches) == 0 {
+		return baseSystemPrompt // No se mencionan archivos, usamos el prompt normal
+	}
+
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString("\n\n--- CONTEXTO DE ARCHIVOS ---\n")
+	contextBuilder.WriteString("El usuario está hablando de estos archivos. Aquí está su contenido actual:\n\n")
+
+	foundFiles := 0
+	for _, filename := range matches {
+		// Medida de seguridad (la misma que en parseAndSaveFiles)
+		if strings.Contains(filename, "..") || strings.HasPrefix(filename, "/") || strings.HasPrefix(filename, "\\") {
+			continue
+		}
+
+		// Intentamos leer el archivo
+		content, err := os.ReadFile(filename)
+		if err != nil {
+			// El archivo no existe o no se puede leer, lo ignoramos.
+			continue
+		}
+
+		// Si el archivo existe, lo añadimos al contexto
+		contextBuilder.WriteString(fmt.Sprintf("--- Contenido de %s ---\n", filename))
+		contextBuilder.WriteString(string(content))
+		contextBuilder.WriteString(fmt.Sprintf("\n--- Fin de %s ---\n\n", filename))
+		foundFiles++
+	}
+
+	// Si no encontramos ningún archivo real, no molestamos al LLM
+	if foundFiles == 0 {
+		return baseSystemPrompt
+	}
+
+	// Añadimos el contexto al prompt del sistema base
+	return baseSystemPrompt + contextBuilder.String()
 }
